@@ -65,6 +65,7 @@ enum lint {
     non_camel_case_types,
     structural_records,
     type_limits,
+    type_overflow,
     default_methods,
     deprecated_self,
 
@@ -202,6 +203,11 @@ fn get_lint_dict() -> lint_dict {
         (~"type_limits",
          @{lint: type_limits,
            desc: ~"comparisons made useless by limits of the types involved",
+           default: warn}),
+
+        (~"type_overflow",
+         @{lint: type_overflow,
+           desc: ~"the integer overflowed the container type",
            default: warn}),
 
         (~"default_methods",
@@ -474,6 +480,10 @@ fn check_item_type_limits(cx: ty::ctxt, it: @ast::item) {
         }
     }
 
+    pure fn is_valid_always<T: cmp::Ord>(v:T, min: T, max: T) -> bool {
+        v <= max && v >= min
+    }
+
     pure fn rev_binop(binop: ast::binop) -> ast::binop {
         match binop {
             ast::lt => ast::gt,
@@ -505,7 +515,7 @@ fn check_item_type_limits(cx: ty::ctxt, it: @ast::item) {
         }
     }
 
-    fn check_limits(cx: ty::ctxt, binop: ast::binop, l: &ast::expr,
+    fn check_limits(cx: ty::ctxt, binop: Option<ast::binop>, l: &ast::expr,
                     r: &ast::expr) -> bool {
         let (lit, expr, swap) = match (l.node, r.node) {
             (ast::expr_lit(_), _) => (l, r, true),
@@ -514,10 +524,12 @@ fn check_item_type_limits(cx: ty::ctxt, it: @ast::item) {
         };
         // Normalize the binop so that the literal is always on the RHS in
         // the comparison
-        let norm_binop = if (swap) {
-            rev_binop(binop)
-        } else {
-            binop
+        let norm_binop = |binop: ast::binop| {
+            if (swap) {
+                rev_binop(binop)
+            } else {
+                binop
+            }
         };
         match ty::get(ty::expr_ty(cx, @*expr)).sty {
             ty::ty_int(int_ty) => {
@@ -531,7 +543,14 @@ fn check_item_type_limits(cx: ty::ctxt, it: @ast::item) {
                     },
                     _ => fail
                 };
-                is_valid(norm_binop, lit_val, min, max)
+                match binop {
+                    Some(binop_) => {
+                        is_valid(norm_binop(binop_), lit_val, min, max)
+                    }
+                    None => {
+                        is_valid_always(lit_val, min, max)
+                    }
+                }
             }
             ty::ty_uint(uint_ty) => {
                 let (min, max): (u64, u64) = uint_ty_range(uint_ty);
@@ -544,7 +563,14 @@ fn check_item_type_limits(cx: ty::ctxt, it: @ast::item) {
                     },
                     _ => fail
                 };
-                is_valid(norm_binop, lit_val, min, max)
+                match binop {
+                    Some(binop_) => {
+                        is_valid(norm_binop(binop_), lit_val, min, max)
+                    }
+                    None => {
+                        is_valid_always(lit_val, min, max)
+                    }
+                }
             }
             _ => true
         }
@@ -563,10 +589,18 @@ fn check_item_type_limits(cx: ty::ctxt, it: @ast::item) {
             match e.node {
                 ast::expr_binary(ref binop, @ref l, @ref r) => {
                     if is_comparison(*binop)
-                       && !check_limits(cx, *binop, l, r) {
+                       && !check_limits(cx, Some(*binop), l, r) {
                         cx.sess.span_lint(
                             type_limits, e.id, it.id, e.span,
                             ~"comparison is useless due to type limits");
+                    }
+                }
+                ast::expr_assign(@ref l, @ref r) |
+                ast::expr_assign_op(_ , @ref l, @ref r) => {
+                    if !check_limits(cx, None, l, r) {
+                        cx.sess.span_lint(
+                            type_limits, e.id, it.id, e.span,
+                            ~"the integer overflowed the container type");
                     }
                 }
                 _ => ()
